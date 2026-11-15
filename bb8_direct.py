@@ -194,7 +194,8 @@ def roll_square(t, stop_event=None):
         print("[sphero] stopped")
 
 
-def patrol(t, seconds=PATROL_SECONDS, speed=PATROL_SPEED, stop_event=None):
+def patrol(t, seconds=PATROL_SECONDS, speed=PATROL_SPEED, stop_event=None,
+           on_collision=None):
     """自主巡逻：随机换向，撞到东西就立刻换方向（复刻原版 App 的做法）。
 
     BB-8 没有避障传感器，靠加速度计的碰撞事件感知障碍；配置参数沿用
@@ -228,6 +229,8 @@ def patrol(t, seconds=PATROL_SECONDS, speed=PATROL_SPEED, stop_event=None):
                 break
             if collided:
                 print("[patrol] collision -> turn")
+                if on_collision is not None:
+                    on_collision()
     finally:
         t.remove_collision_detected_notify_listener(on_collision)
         t.roll(0, 0, RollModes.STOP, ReverseFlags.OFF)

@@ -23,13 +23,14 @@ Drive a Sphero BB-8 directly over BLE from Python, with a local web control pane
 - 电源状态：状态档位、电压、累计充电次数
 - 充电时间预估：用历史电压做线性回归求 V/h，外推到满电
 - 充电指示灯：充电时主灯暗绿慢闪，亮度可调
+- 音效：Web Audio 实时合成的原创电子音，按钮即时反馈 + 碰撞换向 / 进入充电 / 充满 / 低电量等异步事件，带开关和音量
 - 连接状态与实时日志
 
 ### 背景
 
 - Sphero 自 2021-10-01 起把老款机器人的配套 App 从 App Store / Google Play 下架，官方也不再支持这些 legacy 产品。BB-8 原来的巡逻、全息消息、语音指令、星战音效等玩法随之消失。
 - 官方说明 BB-8 仍可用 Sphero Edu 编程，但那是课堂编程工具，只有基础驾驶和 LED，没有角色功能。
-- BB-8 本体**没有扬声器**，所有音效都是手机/平板 App 播放的；同代的 R2-D2 / R2-Q5 才内置喇叭。因此本项目不提供音效，也没有复制任何有版权的星战原声。
+- BB-8 本体**没有扬声器**，所有音效都是手机/平板 App 播放的；同代的 R2-D2 / R2-Q5 才内置喇叭。因此本项目的音效由网页端用 Web Audio 实时合成、经浏览器播放 —— 和原版 App 一样声音来自手机/电脑这一侧，而不是 droid 本体；全部是原创电子音，没有复制任何有版权的星战原声。
 
 ### 快速开始
 
@@ -70,7 +71,7 @@ BB8_UUID=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX .venv/bin/python bb8_web.py
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/` | 控制页面 |
-| GET | `/api/status` | 连接状态、当前模式、电源状态、充电预估、日志 |
+| GET | `/api/status` | 连接状态、当前模式、电源状态、充电预估、异步事件（供音效触发）、日志 |
 | POST | `/api/reconnect` | 重新连接 |
 | POST | `/api/stop` | 紧急停止 |
 | POST | `/api/led` | `{"r":255,"g":140,"b":0}` 设置主灯 |
@@ -102,6 +103,8 @@ BB8_UUID=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX .venv/bin/python bb8_web.py
 8. **BB-8 不提供电量百分比。** 只能按电压粗估（2S 锂电 6.0–8.4V）。充电时长用最近 30 分钟的电压做最小二乘线性回归，线性外推到 8.4V；锂电进入恒压（CV）阶段后升压变慢，所以这是粗略估计，实际通常更久。电压样本持久化到文件，重启不丢。
 
 9. **碰撞巡逻是"撞了再换向"。** BB-8 没有测距 / 避障传感器，`configure_collision_detection()` 加异步碰撞回调是唯一手段，这也正是原版 App 巡逻模式的做法。回调里只置 Event，不直接下发指令，避免和主循环抢应答队列。
+
+10. **音效放在浏览器侧，且不能依赖页面加载时自动播放。** 用 `OscillatorNode` + `GainNode` 包络实时合成短促的上下滑音，零音频文件。浏览器自动播放策略要求用户手势后才能创建 / 恢复 `AudioContext`，所以 `AudioContext` 懒初始化，第一次点击才出声。按钮点击在前端即时播放（零延迟）；碰撞、进入充电、充满、低电量、错误等后端异步事件则由 worker 追加到带序号的事件队列，网页轮询 `/api/status` 时只播放比上次序号更新的事件，页面首次加载会跳过历史事件以免一次性齐鸣。开关和音量存 `localStorage`。
 
 ### 安全
 
@@ -151,13 +154,14 @@ Features:
 - Power state: state level, voltage, cumulative charge count
 - Charge-time estimate: linear regression over historical voltage to get V/h, extrapolated to full charge
 - Charge indicator: dim green slow blink while charging, with adjustable brightness
+- Sound effects: original Web Audio blips for button feedback plus async events (collision, charging started, full, low battery), with on/off and volume
 - Connection status and a live log
 
 ### Background
 
 - Since 2021-10-01 Sphero removed the companion apps for its legacy robots from the App Store and Google Play, and no longer supports these products. BB-8's original Patrol, holographic messages, voice commands and Star Wars sound effects disappeared along with them.
 - Sphero states that BB-8 can still be programmed with Sphero Edu, but that is a classroom coding tool: basic driving and LEDs only, none of the character features.
-- **BB-8 has no speaker.** All sounds were played by the phone/tablet app; the R2-D2 / R2-Q5 from the same generation have built-in speakers. This project therefore ships no sound effects and does not reproduce any copyrighted Star Wars audio.
+- **BB-8 has no speaker.** All sounds were played by the phone/tablet app; the R2-D2 / R2-Q5 from the same generation have built-in speakers. This project therefore synthesizes its sounds in the browser with Web Audio and plays them through the computer's speakers — like the original app, the sound comes from the phone/PC side, not from the droid. All sounds are original synthesized blips; no copyrighted Star Wars audio is reproduced.
 
 ### Quick start
 
@@ -198,7 +202,7 @@ BB8_UUID=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX .venv/bin/python bb8_web.py
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/` | Control page |
-| GET | `/api/status` | Connection, mode, power state, charge estimate, log |
+| GET | `/api/status` | Connection, mode, power state, charge estimate, async events (for sound), log |
 | POST | `/api/reconnect` | Reconnect |
 | POST | `/api/stop` | Emergency stop |
 | POST | `/api/led` | `{"r":255,"g":140,"b":0}` set main LED |
@@ -230,6 +234,8 @@ Every POST returns immediately and enqueues the command; a single worker thread 
 8. **BB-8 does not report a battery percentage.** It can only be estimated from voltage (2S Li-ion/LiPo, 6.0–8.4 V). Charge time uses least-squares regression over the last 30 minutes of voltage samples, extrapolated linearly to 8.4 V. Once the cell enters the constant-voltage (CV) phase the voltage rises more slowly, so this is a rough estimate and the real time is usually longer. Voltage samples are persisted to a file and survive restarts.
 
 9. **Collision patrol means "bump, then turn".** BB-8 has no ranging or obstacle-avoidance sensors; `configure_collision_detection()` plus the async collision callback is the only mechanism — exactly how the original app's Patrol mode worked. The callback only sets an Event; it never issues a command directly, so it cannot race the main loop for responses.
+
+10. **Sound lives in the browser and must not autoplay on page load.** Short swept tones are synthesized on the fly with `OscillatorNode` plus a `GainNode` envelope — no audio files. Browser autoplay policy requires a user gesture before an `AudioContext` can be created or resumed, so the context is lazily initialized on the first click. Button clicks play immediately in the frontend (zero latency); backend async events (collision, charging started, full, low battery, errors) are appended by the worker to a sequenced event queue, and the page — while polling `/api/status` — plays only events newer than the last seen sequence number. The first poll skips history so the page does not play everything at once. On/off and volume are stored in `localStorage`.
 
 ### Safety
 

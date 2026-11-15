@@ -58,6 +58,10 @@ class Droid:
         self.last_led = None             # 最近一次写入主灯的 RGB，便于观测闪烁
         self._led_override_until = 0
         self._was_charging = False
+        self._last_power_state = None
+        self._charged_emitted = False
+        self.events = deque(maxlen=30)
+        self._event_seq = 0
         self.log = deque(maxlen=50)
         threading.Thread(target=self._worker, daemon=True).start()
         threading.Thread(target=self._power_ticker, daemon=True).start()
@@ -188,6 +192,13 @@ class Droid:
     def _note(self, msg):
         self.log.append(f"{time.strftime('%H:%M:%S')} {msg}")
 
+    def _emit(self, kind, **kw):
+        """异步事件，供网页触发音效（只做 deque 追加，可在 worker 线程调用）。"""
+        with self._hist_lock:
+            self._event_seq += 1
+            self.events.append({"seq": self._event_seq, "type": kind,
+                                "ts": time.strftime("%H:%M:%S"), **kw})
+
     def _connect(self):
         name, uuid = bb8.cached_sphero_uuid()
         toy = bb8.BB8(bb8.DeviceInfo(uuid, name), bb8.CachedBleakAdapter)
@@ -224,6 +235,9 @@ class Droid:
                 break
 
     def status(self):
+        with self._hist_lock:
+            events = list(self.events)
+            event_seq = self._event_seq
         return {
             "ok": True,
             "connected": self.connected,
@@ -234,6 +248,8 @@ class Droid:
             "charge": self._charge_estimate(),
             "charge_led": {"on": self.charge_led_on, "level": self.charge_led_level},
             "last_led": self.last_led,
+            "events": events,
+            "event_seq": event_seq,
             "log": list(self.log),
         }
 
@@ -276,6 +292,7 @@ class Droid:
                     self._run(name, data)
             except Exception as e:
                 self._note(f"错误 {type(e).__name__}: {e}")
+                self._emit("error")
                 self._disconnect()
                 self.mode = "idle"
             finally:
@@ -310,10 +327,24 @@ class Droid:
                 }
                 self._record_charge(self.power)
                 charging = self.power.get("state") == "CHARGING"
+                state = self.power.get("state")
+                voltage = self.power.get("voltage", 0)
+
+                if charging and not self._was_charging:
+                    self._emit("charging")
+                if state in ("LOW", "CRITICAL") and self._last_power_state not in ("LOW", "CRITICAL"):
+                    self._emit("low")
+                if voltage >= FULL_VOLTAGE - 0.03 and not self._charged_emitted:
+                    self._emit("charged")
+                    self._charged_emitted = True
+                elif voltage < FULL_VOLTAGE - 0.10:
+                    self._charged_emitted = False
+
                 if self._was_charging and not charging and self.charge_led_on:
                     self.toy.set_main_led(0, 0, 0)  # 拔下充电座时熄灭指示灯
                     self.last_led = (0, 0, 0)
                 self._was_charging = charging
+                self._last_power_state = state
             except Exception as e:
                 self.power = {"error": f"{type(e).__name__}: {e}",
                               "ts": time.strftime("%H:%M:%S")}
@@ -376,7 +407,8 @@ class Droid:
             speed = clamp(int(data.get("speed", 50)), 0, 255)
             self.mode = "patrol"
             self._note(f"开始巡逻 {seconds}s @ {speed}")
-            bb8.patrol(t, seconds=seconds, speed=speed, stop_event=self.stop_evt)
+            bb8.patrol(t, seconds=seconds, speed=speed, stop_event=self.stop_evt,
+                       on_collision=lambda: self._emit("collision"))
             self.mode = "idle"
             self._note("巡逻结束")
 
@@ -519,18 +551,18 @@ pre{
   <div class="card">
     <div class="row" style="justify-content:space-between">
       <div class="badge"><span id="dot" class="dot"></span><span id="state">连接中…</span></div>
-      <button onclick="post('/api/reconnect')">重新连接</button>
+      <button onclick="act('/api/reconnect',{},'blip')">重新连接</button>
     </div>
     <div class="row" style="margin-top:12px;justify-content:space-between">
       <div class="badge" id="powerText">电源: 读取中…</div>
-      <button onclick="post('/api/power')">刷新电量</button>
+      <button onclick="act('/api/power',{},'blip')">刷新电量</button>
     </div>
     <div class="bar"><div id="barFill" class="fill"></div></div>
     <div class="charge" id="chargeText">充电预估：等待数据…</div>
     <div class="hint" id="powerHint">BB-8 不提供官方电量百分比；百分比按电压估算（2S 6.0–8.4V），充电时仅供参考。充电时长为线性外推，锂电池进入恒压阶段后升压会变慢，实际通常更久。</div>
   </div>
 
-  <div class="card stopcard"><button class="stop" onclick="post('/api/stop')">紧急停止 / STOP</button></div>
+  <div class="card stopcard"><button class="stop" onclick="act('/api/stop',{},'stop')">紧急停止 / STOP</button></div>
 
   <div class="card">
     <h2>驾驶</h2>
@@ -540,7 +572,7 @@ pre{
     </div>
     <div class="pad">
       <button data-h="315">↖</button><button data-h="0">↑</button><button data-h="45">↗</button>
-      <button data-h="270">←</button><button class="center" onclick="post('/api/stop')">停</button><button data-h="90">→</button>
+      <button data-h="270">←</button><button class="center" onclick="act('/api/stop',{},'stop')">停</button><button data-h="90">→</button>
       <button data-h="225">↙</button><button data-h="180">↓</button><button data-h="135">↘</button>
     </div>
     <div class="hint">点一次 = 朝该方向滚一段后自动停。heading 以蓝色尾灯朝向自己为 0°。</div>
@@ -570,14 +602,24 @@ pre{
   <div class="card">
     <h2>动作</h2>
     <div class="row">
-      <button onclick="post('/api/square')">走正方形</button>
+      <button onclick="act('/api/square',{},'square')">走正方形</button>
       <button onclick="startPatrol()">开始巡逻</button>
-      <button onclick="post('/api/stop')">停止巡逻</button>
+      <button onclick="act('/api/stop',{},'stop')">停止巡逻</button>
     </div>
     <div class="row" style="margin-top:10px">
       <div class="field"><label>巡逻时长 <span id="ptv">20</span> s</label><input id="pt" type="range" min="5" max="60" step="5" value="20"></div>
     </div>
     <div class="hint">巡逻是随机换向 + 碰撞检测，务必放在空旷、无桌沿 / 楼梯的地面。</div>
+  </div>
+
+  <div class="card">
+    <h2>音效</h2>
+    <div class="row">
+      <label class="switch"><input type="checkbox" id="sfxOn" checked onchange="saveSfx()"> 开启音效</label>
+      <div class="field"><label>音量 <span id="sfxv">35</span>%</label><input id="sfx" type="range" min="0" max="100" value="35" oninput="$('sfxv').textContent=this.value" onchange="saveSfx()"></div>
+      <button onclick="previewSfx()">试听</button>
+    </div>
+    <div class="hint">Web Audio 实时合成的原创电子音，非电影原声。浏览器要求首次点击后才能出声；碰撞换向、进入充电、充满、低电量等异步事件也会发声。</div>
   </div>
 
   <div class="card"><h2>日志</h2><pre id="log"></pre></div>
@@ -588,13 +630,76 @@ function bind(id, out){const e=$(id);const u=()=>$(out).textContent=e.value;e.ad
 bind('spd','spdv'); bind('dur','durv'); bind('bl','blv'); bind('pt','ptv'); bind('cl','clv');
 let clSynced=false;
 async function post(p,b={}){try{return await (await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json();}catch(e){return {ok:false,error:String(e)};}}
+
+/* ---- 音效：Web Audio 实时合成，零文件依赖、非电影原声 ---- */
+let sfxOn=localStorage.getItem('bb8.sfxOn')!=='0';
+let sfxVol=Math.max(0,Math.min(100,+(localStorage.getItem('bb8.sfxVol')||35)));
+let ac=null;
+function saveSfx(){
+  sfxOn=$('sfxOn').checked; sfxVol=+$('sfx').value;
+  try{localStorage.setItem('bb8.sfxOn',sfxOn?'1':'0');localStorage.setItem('bb8.sfxVol',sfxVol);}catch(e){}
+}
+function ctx(){
+  if(!sfxOn) return null;
+  if(!ac){
+    const C=window.AudioContext||window.webkitAudioContext;
+    if(!C) return null;
+    try{ac=new C();}catch(e){return null;}
+  }
+  if(ac.state==='suspended') ac.resume();
+  return ac;
+}
+function tone(o){
+  const c=ctx(); if(!c) return;
+  const t0=c.currentTime+(o.at||0);
+  const osc=c.createOscillator(), g=c.createGain();
+  osc.type=o.type||'sine';
+  osc.frequency.setValueAtTime(o.f0,t0);
+  if(o.f1) osc.frequency.exponentialRampToValueAtTime(Math.max(20,o.f1),t0+o.dur);
+  const vol=Math.max(0.0002,(o.gain||0.25)*sfxVol/100);
+  g.gain.setValueAtTime(0.0001,t0);
+  g.gain.exponentialRampToValueAtTime(vol,t0+0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001,t0+o.dur);
+  osc.connect(g); g.connect(c.destination);
+  osc.start(t0); osc.stop(t0+o.dur+0.02);
+}
+const SFX={
+  blip:      [{f0:620,f1:840,dur:0.08,gain:0.18}],
+  drive:     [{f0:520,f1:780,dur:0.10,gain:0.24}],
+  color:     [{f0:660,f1:990,dur:0.09,gain:0.20},{f0:880,f1:1180,dur:0.09,at:0.09,gain:0.16}],
+  backlight: [{f0:420,f1:560,dur:0.09,gain:0.18}],
+  square:    [{f0:440,f1:660,dur:0.10,gain:0.20},{f0:660,f1:880,dur:0.10,at:0.11,gain:0.20},{f0:880,f1:620,dur:0.11,at:0.22,gain:0.20}],
+  patrol:    [{f0:380,f1:700,dur:0.13,type:'triangle',gain:0.18},{f0:700,f1:420,dur:0.13,at:0.14,type:'triangle',gain:0.18}],
+  stop:      [{f0:420,f1:150,dur:0.22,type:'triangle',gain:0.28}],
+  collision: [{f0:300,f1:170,dur:0.09,type:'square',gain:0.10},{f0:520,f1:760,dur:0.10,at:0.08,gain:0.16}],
+  charging:  [{f0:520,f1:660,dur:0.12,gain:0.18},{f0:660,f1:880,dur:0.12,at:0.13,gain:0.18}],
+  charged:   [{f0:660,f1:880,dur:0.12,gain:0.20},{f0:880,f1:1320,dur:0.18,at:0.13,gain:0.20}],
+  low:       [{f0:700,f1:700,dur:0.13,type:'square',gain:0.10},{f0:700,f1:700,dur:0.13,at:0.20,type:'square',gain:0.10}],
+  error:     [{f0:240,f1:160,dur:0.25,type:'sawtooth',gain:0.12}]
+};
+function sfx(name){(SFX[name]||[]).forEach(tone);}
+function previewSfx(){sfx('color');}
+function act(path,body,kind){sfx(kind);return post(path,body||{});}
+$('sfxOn').checked=sfxOn; $('sfx').value=sfxVol; $('sfxv').textContent=sfxVol;
+
+const EVENT_SFX={collision:'collision',charging:'charging',charged:'charged',low:'low',error:'error'};
+let evInit=false,lastSeq=0;
+function handleEvents(s){
+  if(!evInit){lastSeq=s.event_seq||0;evInit=true;return;}
+  (s.events||[]).forEach(e=>{
+    if(e.seq<=lastSeq) return;
+    lastSeq=e.seq;
+    const k=EVENT_SFX[e.type]; if(k) sfx(k);
+  });
+}
+
 function pick(hex){$('color').value=hex;setColor();}
 function hex2rgb(h){return {r:parseInt(h.slice(1,3),16),g:parseInt(h.slice(3,5),16),b:parseInt(h.slice(5,7),16)};}
-function setColor(){post('/api/led',hex2rgb($('color').value));}
-function setBack(){post('/api/back_led',{brightness:+$('bl').value});}
-function setChargeLed(){post('/api/charge_led',{on:$('clOn').checked,level:+$('cl').value});}
-function startPatrol(){post('/api/patrol',{seconds:+$('pt').value,speed:+$('spd').value});}
-document.querySelectorAll('[data-h]').forEach(b=>b.addEventListener('click',()=>post('/api/roll',{heading:+b.dataset.h,speed:+$('spd').value,duration:+$('dur').value})));
+function setColor(){sfx('color');post('/api/led',hex2rgb($('color').value));}
+function setBack(){sfx('backlight');post('/api/back_led',{brightness:+$('bl').value});}
+function setChargeLed(){sfx('blip');post('/api/charge_led',{on:$('clOn').checked,level:+$('cl').value});}
+function startPatrol(){sfx('patrol');post('/api/patrol',{seconds:+$('pt').value,speed:+$('spd').value});}
+document.querySelectorAll('[data-h]').forEach(b=>b.addEventListener('click',()=>act('/api/roll',{heading:+b.dataset.h,speed:+$('spd').value,duration:+$('dur').value},'drive')));
 const STATE_LABEL={CHARGING:'充电中',OK:'电量正常',LOW:'电量低',CRITICAL:'电量极低',UNKNOWN:'未知'};
 function renderPower(p){
   if(!p){$('powerText').textContent='电源: 读取中…';return;}
@@ -627,6 +732,7 @@ async function tick(){
     $('state').textContent=(s.connected?'已连接':'未连接')+' · '+s.mode+(s.stopping?' · 停止中':'');
     renderPower(s.power);
     renderCharge(s.charge);
+    handleEvents(s);
     if(s.charge_led && !clSynced){
       $('clOn').checked=s.charge_led.on; $('cl').value=s.charge_led.level;
       $('clv').textContent=s.charge_led.level; clSynced=true;
