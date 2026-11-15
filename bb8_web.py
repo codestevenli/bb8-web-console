@@ -408,7 +408,10 @@ class Droid:
             self.mode = "patrol"
             self._note(f"开始巡逻 {seconds}s @ {speed}")
             bb8.patrol(t, seconds=seconds, speed=speed, stop_event=self.stop_evt,
-                       on_collision=lambda: self._emit("collision"))
+                       on_leg=lambda h: self._emit("patrol_leg", heading=h),
+                       on_collision=lambda: self._emit("collision"),
+                       on_end=lambda interrupted: self._emit("patrol_end",
+                                                             interrupted=interrupted))
             self.mode = "idle"
             self._note("巡逻结束")
 
@@ -619,7 +622,7 @@ pre{
       <div class="field"><label>音量 <span id="sfxv">35</span>%</label><input id="sfx" type="range" min="0" max="100" value="35" oninput="$('sfxv').textContent=this.value" onchange="saveSfx()"></div>
       <button onclick="previewSfx()">试听</button>
     </div>
-    <div class="hint">Web Audio 实时合成的原创电子音，非电影原声。浏览器要求首次点击后才能出声；碰撞换向、进入充电、充满、低电量等异步事件也会发声。</div>
+    <div class="hint">Web Audio 实时合成的原创电子音，非电影原声。浏览器要求首次点击后才能出声；巡逻期间每次换向会轻声提示（音高随方向变化）、撞墙和结束各有音效，进入充电、充满、低电量等异步事件也会发声。</div>
   </div>
 
   <div class="card"><h2>日志</h2><pre id="log"></pre></div>
@@ -670,6 +673,7 @@ const SFX={
   backlight: [{f0:420,f1:560,dur:0.09,gain:0.18}],
   square:    [{f0:440,f1:660,dur:0.10,gain:0.20},{f0:660,f1:880,dur:0.10,at:0.11,gain:0.20},{f0:880,f1:620,dur:0.11,at:0.22,gain:0.20}],
   patrol:    [{f0:380,f1:700,dur:0.13,type:'triangle',gain:0.18},{f0:700,f1:420,dur:0.13,at:0.14,type:'triangle',gain:0.18}],
+  patrol_end:[{f0:620,f1:300,dur:0.20,type:'triangle',gain:0.18}],
   stop:      [{f0:420,f1:150,dur:0.22,type:'triangle',gain:0.28}],
   collision: [{f0:300,f1:170,dur:0.09,type:'square',gain:0.10},{f0:520,f1:760,dur:0.10,at:0.08,gain:0.16}],
   charging:  [{f0:520,f1:660,dur:0.12,gain:0.18},{f0:660,f1:880,dur:0.12,at:0.13,gain:0.18}],
@@ -682,13 +686,20 @@ function previewSfx(){sfx('color');}
 function act(path,body,kind){sfx(kind);return post(path,body||{});}
 $('sfxOn').checked=sfxOn; $('sfx').value=sfxVol; $('sfxv').textContent=sfxVol;
 
-const EVENT_SFX={collision:'collision',charging:'charging',charged:'charged',low:'low',error:'error'};
+const EVENT_SFX={collision:'collision',charging:'charging',charged:'charged',
+                 low:'low',error:'error',patrol_end:'patrol_end'};
 let evInit=false,lastSeq=0;
 function handleEvents(s){
   if(!evInit){lastSeq=s.event_seq||0;evInit=true;return;}
   (s.events||[]).forEach(e=>{
     if(e.seq<=lastSeq) return;
     lastSeq=e.seq;
+    if(e.type==='patrol_leg'){
+      // 音高随航向变化，像巡逻时自言自语；音量刻意压低，避免长时间吵
+      const f=420+(e.heading||0)*1.3;
+      tone({f0:f,f1:f*1.28,dur:0.09,gain:0.11});
+      return;
+    }
     const k=EVENT_SFX[e.type]; if(k) sfx(k);
   });
 }

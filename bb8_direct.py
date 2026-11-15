@@ -195,27 +195,33 @@ def roll_square(t, stop_event=None):
 
 
 def patrol(t, seconds=PATROL_SECONDS, speed=PATROL_SPEED, stop_event=None,
-           on_collision=None):
+           on_collision=None, on_leg=None, on_end=None):
     """自主巡逻：随机换向，撞到东西就立刻换方向（复刻原版 App 的做法）。
 
     BB-8 没有避障传感器，靠加速度计的碰撞事件感知障碍；配置参数沿用
-    spherov2 ToyUtil 给 V1 机器人的推荐值。回调里只置 Event，不直接发
+    spherov2 ToyUtil 给 V1 机器人的推荐值。回调里只发通知，不直接下发
     roll 指令，避免和主循环抢同一个应答队列。
+
+    on_leg(heading)           每段换向时触发，可用于播放巡逻音效
+    on_collision()            撞到障碍时触发
+    on_end(interrupted)       巡逻结束（正常结束 / 被 stop_event 中断）时触发
     """
     hit = threading.Event()
 
-    def on_collision(c):  # c: CollisionDetected(加速度/轴/速度/时间)
+    def _ble_collision(c):  # c: CollisionDetected(加速度/轴/速度/时间)
         hit.set()
 
     t.configure_collision_detection(
         CollisionDetectionMethods.DEFAULT, 90, 130, 90, 130, 1
     )
-    t.add_collision_detected_notify_listener(on_collision)
+    t.add_collision_detected_notify_listener(_ble_collision)
     try:
         end = time.monotonic() + seconds
         stopped = lambda: stop_event is not None and stop_event.is_set()
         while time.monotonic() < end and not stopped():
             heading = random.randrange(0, 360, 15)
+            if on_leg is not None:
+                on_leg(heading)
             t.roll(speed, heading, RollModes.GO, ReverseFlags.OFF)
             print(f"[patrol] heading={heading} speed={speed}")
             hit.clear()
@@ -232,9 +238,11 @@ def patrol(t, seconds=PATROL_SECONDS, speed=PATROL_SPEED, stop_event=None,
                 if on_collision is not None:
                     on_collision()
     finally:
-        t.remove_collision_detected_notify_listener(on_collision)
+        t.remove_collision_detected_notify_listener(_ble_collision)
         t.roll(0, 0, RollModes.STOP, ReverseFlags.OFF)
         print("[patrol] stopped")
+        if on_end is not None:
+            on_end(bool(stop_event is not None and stop_event.is_set()))
 
 
 def main():
