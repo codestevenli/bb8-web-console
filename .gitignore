@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+
+# 运行时数据 / runtime telemetry
+bb8_charge_history.json
+*charge_history*.json
+*.log
